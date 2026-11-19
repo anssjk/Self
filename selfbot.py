@@ -2,7 +2,7 @@
 """
 Self Bot تلگرام - ۲۰ صفحه × ۶ قابلیت = ۱۲۰ قابلیت (شامل ایموجی پریمیوم)
 نیازمندی: pip install telethon
-اجرا:  API_ID=... API_HASH=... BOT_TOKEN=... python main.py
+اجرا:  API_ID=... API_HASH=... BOT_TOKEN=... python selfbot.py
 در چت، پنل را با  .panel  باز کنید.
 (در @BotFather برای ربات دستور /setinline را بزنید.)
 """
@@ -18,32 +18,11 @@ from telethon.tl.functions.account import UpdateProfileRequest
 from telethon.tl.functions.users import GetFullUserRequest
 from telethon.tl.functions.messages import GetStickerSetRequest
 
-# --- ساخت SESSION_STRING (یک‌بار روی کامپیوتر/Termux):  python main.py session ---
-if len(sys.argv) > 1 and sys.argv[1] == "session":
-    from telethon.sync import TelegramClient as _TC
-    _id = int(input("API_ID: ").strip())
-    _hash = input("API_HASH: ").strip()
-    with _TC(StringSession(), _id, _hash) as _c:
-        print("\n=== SESSION_STRING (محرمانه؛ به کسی ندهید) ===")
-        print(_c.session.save())
-        print("==============================================")
-        print("این رشته را در Railway → Variables با نام SESSION_STRING بگذارید.")
-    sys.exit(0)
+API_ID = int(os.environ["API_ID"])
+API_HASH = os.environ["API_HASH"]
+BOT_TOKEN = os.environ["BOT_TOKEN"]
 
-# --- بررسی متغیرها با پیام روشن ---
-_missing = [k for k in ("API_ID", "API_HASH", "BOT_TOKEN") if not os.environ.get(k, "").strip()]
-if _missing:
-    sys.exit("❌ این متغیرها تنظیم نشده‌اند (Railway → Variables): " + ", ".join(_missing))
-if not os.environ["API_ID"].strip().isdigit():
-    sys.exit("❌ API_ID باید فقط عدد باشد (بدون فاصله و کوتیشن).")
-if ":" not in os.environ["BOT_TOKEN"]:
-    sys.exit("❌ BOT_TOKEN اشتباه است؛ شکل درستش مثل 123456:ABC-DEF است.")
-
-API_ID = int(os.environ["API_ID"].strip())
-API_HASH = os.environ["API_HASH"].strip()
-BOT_TOKEN = os.environ["BOT_TOKEN"].strip()
-
-SESSION_STRING = os.environ.get("SESSION_STRING")  # برای Railway (با python main.py session بسازید)
+SESSION_STRING = os.environ.get("SESSION_STRING")  # برای Railway (با gen_session.py بسازید)
 user = TelegramClient(StringSession(SESSION_STRING) if SESSION_STRING else "self_session",
                       API_ID, API_HASH)
 bot = TelegramClient(StringSession() if SESSION_STRING else "panel_bot", API_ID, API_HASH)
@@ -52,7 +31,7 @@ BOT_USERNAME = None
 START = time.time()
 
 # ---------------- تنظیمات ماندگار ----------------
-FILE = os.environ.get("SETTINGS_FILE") or ("/data/settings.json" if os.path.isdir("/data") else "settings.json")
+FILE = os.environ.get("SETTINGS_FILE", "settings.json")  # روی Railway: /data/settings.json
 S = json.load(open(FILE)) if os.path.exists(FILE) else {}
 
 
@@ -1356,7 +1335,7 @@ async def clock_loop():
 async def main():
     global ME, BOT_USERNAME
     if (os.environ.get("RAILWAY_ENVIRONMENT") or os.environ.get("RAILWAY_PROJECT_ID")) and not SESSION_STRING:
-        sys.exit("❌ متغیر SESSION_STRING تنظیم نشده. اول روی سیستم خودتان «python main.py session» را اجرا کنید.")
+        sys.exit("❌ متغیر SESSION_STRING تنظیم نشده. اول gen_session.py را روی سیستم خودتان اجرا کنید.")
     await user.start()
     await bot.start(bot_token=BOT_TOKEN)
     ME = await user.get_me()
