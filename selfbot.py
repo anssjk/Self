@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """
 Self Bot تلگرام - ۲۰ صفحه × ۶ قابلیت = ۱۲۰ قابلیت (شامل ایموجی پریمیوم)
-نیازمندی: pip install telethon
+بدون Telethon؛ مبتنی بر Pyrofork (MTProto)
+نیازمندی: pip install pyrofork tgcrypto
 اجرا:  API_ID=... API_HASH=... BOT_TOKEN=... python selfbot.py
 در چت، پنل را با  .panel  باز کنید.
 (در @BotFather برای ربات دستور /setinline را بزنید.)
@@ -10,25 +11,27 @@ import ast, asyncio, base64, codecs, collections, datetime as dt, hashlib, io
 import json, operator as op, os, platform, random, re, secrets, string, sys, time
 import urllib.parse, urllib.request
 
-import telethon
-from telethon import TelegramClient, events, Button, types, functions
-from telethon.sessions import StringSession
-from telethon.helpers import add_surrogate
-from telethon.tl.functions.account import UpdateProfileRequest
-from telethon.tl.functions.users import GetFullUserRequest
-from telethon.tl.functions.messages import GetStickerSetRequest
+import pyrogram
+from pyrogram import Client, filters, enums, raw, idle
+from pyrogram.types import (InlineKeyboardMarkup, InlineKeyboardButton, InlineQueryResultArticle,
+                            InputTextMessageContent, MessageEntity, ChatPrivileges)
 
 API_ID = int(os.environ["API_ID"])
 API_HASH = os.environ["API_HASH"]
 BOT_TOKEN = os.environ["BOT_TOKEN"]
 
 SESSION_STRING = os.environ.get("SESSION_STRING")  # برای Railway (با gen_session.py بسازید)
-user = TelegramClient(StringSession(SESSION_STRING) if SESSION_STRING else "self_session",
-                      API_ID, API_HASH)
-bot = TelegramClient(StringSession() if SESSION_STRING else "panel_bot", API_ID, API_HASH)
+if SESSION_STRING:
+    user = Client("self_session", api_id=API_ID, api_hash=API_HASH, session_string=SESSION_STRING)
+else:
+    user = Client("self_session", api_id=API_ID, api_hash=API_HASH)
+bot = Client("panel_bot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN,
+             in_memory=bool(SESSION_STRING))
 ME = None
 BOT_USERNAME = None
 START = time.time()
+PM = enums.ParseMode
+ET = enums.MessageEntityType
 
 # ---------------- تنظیمات ماندگار ----------------
 FILE = os.environ.get("SETTINGS_FILE", "settings.json")  # روی Railway: /data/settings.json
@@ -39,7 +42,12 @@ def save():
     json.dump(S, open(FILE, "w"), ensure_ascii=False)
 
 
-# ---------------- تعریف ۱۰ صفحه × ۶ قابلیت ----------------
+def u16(s):
+    """طول رشته بر حسب واحدهای UTF-16 (مورد نیاز برای entity ها)"""
+    return len(s.encode("utf-16-le")) // 2
+
+
+# ---------------- تعریف ۲۰ صفحه × ۶ قابلیت ----------------
 # kind: t = کلید روشن/خاموش ، c = دستور
 PAGES = [
     ("🟦", "عمومی", [
@@ -96,7 +104,7 @@ PAGES = [
         ("setname", "نام", "c", ".setname نام | نام‌خانوادگی"),
         ("uptime", "آپتایم", "c", ".uptime → مدت روشن بودن بات"),
         ("me", "پروفایل من", "c", ".me → مشخصات اکانت"),
-        ("ver", "ورژن", "c", ".ver → نسخه پایتون و Telethon"),
+        ("ver", "ورژن", "c", ".ver → نسخه پایتون و Pyrofork"),
     ]),
     ("🟩", "گروه", [
         ("members", "تعداد اعضا", "c", ".members"),
@@ -214,31 +222,31 @@ def page_text(i):
 
 def fbtn(f):
     key, label, kind, _ = f
-    if kind == "t":
-        mark = "🟢" if S.get(key) else "🔴"
-    else:
-        mark = "🔹"
-    return Button.inline(f"{mark} {label}", f"f:{key}")
+    mark = ("🟢" if S.get(key) else "🔴") if kind == "t" else "🔹"
+    return InlineKeyboardButton(f"{mark} {label}", callback_data=f"f:{key}")
 
 
-def page_buttons(i):
+def page_markup(i):
     feats = PAGES[i][2]
     rows = [[fbtn(f) for f in feats[a:a + 2]] for a in range(0, 6, 2)]
     rows.append([
-        Button.inline("◀️", f"p:{(i - 1) % len(PAGES)}"),
-        Button.inline(f"📄 {i + 1}/{len(PAGES)}", "n:0"),
-        Button.inline("▶️", f"p:{(i + 1) % len(PAGES)}"),
+        InlineKeyboardButton("◀️", callback_data=f"p:{(i - 1) % len(PAGES)}"),
+        InlineKeyboardButton(f"📄 {i + 1}/{len(PAGES)}", callback_data="n:0"),
+        InlineKeyboardButton("▶️", callback_data=f"p:{(i + 1) % len(PAGES)}"),
     ])
-    rows.append([Button.inline("❌ بستن", "x:0")])
-    return rows
+    rows.append([InlineKeyboardButton("❌ بستن", callback_data="x:0")])
+    return InlineKeyboardMarkup(rows)
 
 
-@bot.on(events.InlineQuery)
-async def inline(event):
-    if event.sender_id != ME.id:
-        return await event.answer([], cache_time=0)
-    r = event.builder.article("Panel", text=page_text(0), buttons=page_buttons(0))
-    await event.answer([r], cache_time=0)
+@bot.on_inline_query()
+async def inline(_, q):
+    if q.from_user.id != ME.id:
+        return await q.answer([], cache_time=0)
+    r = InlineQueryResultArticle(
+        id="panel", title="Panel",
+        input_message_content=InputTextMessageContent(page_text(0)),
+        reply_markup=page_markup(0))
+    await q.answer([r], cache_time=0)
 
 
 async def on_toggle(key, val):
@@ -246,37 +254,36 @@ async def on_toggle(key, val):
         if val:
             S["ln_base"] = (await user.get_me()).last_name or ""
         else:
-            await user(UpdateProfileRequest(last_name=S.get("ln_base", "")))
+            await user.update_profile(last_name=S.get("ln_base", ""))
     elif key == "bioclock":
         if val:
-            full = await user(GetFullUserRequest("me"))
-            S["bio_base"] = full.full_user.about or ""
+            S["bio_base"] = (await user.get_chat("me")).bio or ""
         else:
-            await user(UpdateProfileRequest(about=S.get("bio_base", "")))
+            await user.update_profile(bio=S.get("bio_base", ""))
 
 
-@bot.on(events.CallbackQuery)
-async def cb(event):
-    if event.sender_id != ME.id:
-        return await event.answer("⛔ این پنل مخصوص صاحب اکانت است", alert=True)
-    kind, _, val = event.data.decode().partition(":")
+@bot.on_callback_query()
+async def cb(_, q):
+    if q.from_user.id != ME.id:
+        return await q.answer("⛔ این پنل مخصوص صاحب اکانت است", show_alert=True)
+    kind, _, val = q.data.partition(":")
     if kind == "p":
         i = int(val)
-        await event.edit(page_text(i), buttons=page_buttons(i))
+        await q.edit_message_text(page_text(i), reply_markup=page_markup(i))
     elif kind == "f":
         i, f = FIND[val]
         if f[2] == "t":
             S[val] = not S.get(val, False)
             await on_toggle(val, S[val])
             save()
-            await event.edit(page_text(i), buttons=page_buttons(i))
-            await event.answer(("روشن شد ✅" if S[val] else "خاموش شد ❌"))
+            await q.edit_message_text(page_text(i), reply_markup=page_markup(i))
+            await q.answer("روشن شد ✅" if S[val] else "خاموش شد ❌")
         else:
-            await event.answer(f[3][:190], alert=True)
+            await q.answer(f[3][:190], show_alert=True)
     elif kind == "x":
-        await event.edit("✅ پنل بسته شد.", buttons=None)
+        await q.edit_message_text("✅ پنل بسته شد.")
     else:
-        await event.answer()
+        await q.answer()
 
 
 # ---------------- دستورات متنی ----------------
@@ -291,18 +298,24 @@ def cmd(*names):
     return deco
 
 
-async def get_text(event, arg):
+async def get_text(m, arg):
     if arg:
         return arg
-    r = await event.get_reply_message()
-    return (r.raw_text or "") if r else ""
+    r = m.reply_to_message
+    return ((r.text or r.caption or "") if r else "")
+
+
+def sid(m):
+    if m.from_user:
+        return m.from_user.id
+    return m.sender_chat.id if m.sender_chat else None
 
 
 def textcmd(name, f):
-    async def h(event, arg):
-        t = await get_text(event, arg)
+    async def h(m, arg):
+        t = await get_text(m, arg)
         if t:
-            await event.edit(f(t))
+            await m.edit_text(f(t), parse_mode=PM.DISABLED)
     CMD[name] = h
 
 
@@ -317,61 +330,61 @@ textcmd("b64d", lambda t: base64.b64decode(t.encode()).decode())
 
 
 @cmd("ping")
-async def _(event, arg):
+async def _(m, arg):
     t = time.perf_counter()
-    await event.edit("🏓 ...")
-    await event.edit(f"🏓 Pong! `{(time.perf_counter() - t) * 1000:.0f} ms`")
+    await m.edit_text("🏓 ...")
+    await m.edit_text(f"🏓 Pong! `{(time.perf_counter() - t) * 1000:.0f} ms`")
 
 
 @cmd("time")
-async def _(event, arg):
-    await event.edit(f"🕒 {dt.datetime.now():%H:%M:%S}")
+async def _(m, arg):
+    await m.edit_text(f"🕒 {dt.datetime.now():%H:%M:%S}")
 
 
 @cmd("date")
-async def _(event, arg):
-    await event.edit(f"📅 {dt.datetime.now():%Y-%m-%d (%A)}")
+async def _(m, arg):
+    await m.edit_text(f"📅 {dt.datetime.now():%Y-%m-%d (%A)}")
 
 
 @cmd("id")
-async def _(event, arg):
-    r = await event.get_reply_message()
-    await event.edit(f"🆔 کاربر: `{r.sender_id}`\n💬 چت: `{event.chat_id}`" if r else f"💬 چت: `{event.chat_id}`")
+async def _(m, arg):
+    r = m.reply_to_message
+    await m.edit_text(f"🆔 کاربر: `{sid(r)}`\n💬 چت: `{m.chat.id}`" if r else f"💬 چت: `{m.chat.id}`")
 
 
 @cmd("info")
-async def _(event, arg):
-    c = await event.get_chat()
-    name = getattr(c, "title", None) or getattr(c, "first_name", "")
-    await event.edit(f"ℹ️ نام: {name}\n🆔 `{event.chat_id}`\n📦 نوع: {type(c).__name__}")
+async def _(m, arg):
+    c = m.chat
+    name = c.title or c.first_name or ""
+    await m.edit_text(f"ℹ️ نام: {name}\n🆔 `{c.id}`\n📦 نوع: {c.type.name}")
 
 
 @cmd("help")
-async def _(event, arg):
-    await event.edit("🎛 برای دیدن همه ۶۰ قابلیت، دستور `.panel` را بفرستید.")
+async def _(m, arg):
+    await m.edit_text("🎛 برای دیدن همه ۱۲۰ قابلیت، دستور `.panel` را بفرستید.")
 
 
 @cmd("setreply")
-async def _(event, arg):
+async def _(m, arg):
     S["reply_text"] = arg or "سلام! فعلاً در دسترس نیستم، بعداً پاسخ می‌دهم."
     save()
-    await event.edit("✅ متن پاسخ خودکار ذخیره شد.")
+    await m.edit_text("✅ متن پاسخ خودکار ذخیره شد.")
 
 
 @cmd("save")
-async def _(event, arg):
-    r = await event.get_reply_message()
+async def _(m, arg):
+    r = m.reply_to_message
     if r:
-        await r.forward_to("me")
-    await event.delete()
+        await r.forward("me")
+    await m.delete()
 
 
 @cmd("del")
-async def _(event, arg):
-    r = await event.get_reply_message()
-    if r and r.out:
+async def _(m, arg):
+    r = m.reply_to_message
+    if r and r.outgoing:
         await r.delete()
-    await event.delete()
+    await m.delete()
 
 
 # --- ریاضی ---
@@ -392,125 +405,129 @@ def ev(n):
 
 
 @cmd("calc")
-async def _(event, arg):
-    await event.edit(f"🧮 `{arg}` = `{ev(ast.parse(arg, mode='eval').body)}`")
+async def _(m, arg):
+    await m.edit_text(f"🧮 `{arg}` = `{ev(ast.parse(arg, mode='eval').body)}`")
 
 
 @cmd("rand")
-async def _(event, arg):
+async def _(m, arg):
     a = [int(x) for x in arg.split()] or [1, 100]
     lo, hi = (a[0], a[1]) if len(a) > 1 else (1, a[0])
-    await event.edit(f"🎯 `{random.randint(lo, hi)}`")
+    await m.edit_text(f"🎯 `{random.randint(lo, hi)}`")
 
 
 @cmd("coin")
-async def _(event, arg):
-    await event.edit(random.choice(["🪙 شیر", "🪙 خط"]))
+async def _(m, arg):
+    await m.edit_text(random.choice(["🪙 شیر", "🪙 خط"]))
 
 
 @cmd("pass")
-async def _(event, arg):
+async def _(m, arg):
     n = min(int(arg or 16), 64)
     chars = string.ascii_letters + string.digits + "!@#$%^&*"
-    await event.edit("🔐 `" + "".join(secrets.choice(chars) for _ in range(n)) + "`")
+    await m.edit_text("🔐 `" + "".join(secrets.choice(chars) for _ in range(n)) + "`")
 
 
 # --- اکانت ---
 @cmd("stats")
-async def _(event, arg):
+async def _(m, arg):
     pv = gp = ch = 0
-    async for d in user.iter_dialogs():
-        if d.is_user:
+    async for d in user.get_dialogs():
+        t = d.chat.type
+        if t in (enums.ChatType.PRIVATE, enums.ChatType.BOT):
             pv += 1
-        elif d.is_group:
+        elif t in (enums.ChatType.GROUP, enums.ChatType.SUPERGROUP):
             gp += 1
-        elif d.is_channel:
+        elif t == enums.ChatType.CHANNEL:
             ch += 1
-    await event.edit(f"📊 پیوی: {pv}\n👥 گروه: {gp}\n📢 کانال: {ch}")
+    await m.edit_text(f"📊 پیوی: {pv}\n👥 گروه: {gp}\n📢 کانال: {ch}")
 
 
 @cmd("setbio")
-async def _(event, arg):
-    await user(UpdateProfileRequest(about=arg[:70]))
-    await event.edit("✅ بیو تغییر کرد.")
+async def _(m, arg):
+    await user.update_profile(bio=arg[:70])
+    await m.edit_text("✅ بیو تغییر کرد.")
 
 
 @cmd("setname")
-async def _(event, arg):
+async def _(m, arg):
     first, _, last = arg.partition("|")
-    await user(UpdateProfileRequest(first_name=first.strip(), last_name=last.strip()))
-    await event.edit("✅ نام تغییر کرد.")
+    await user.update_profile(first_name=first.strip(), last_name=last.strip())
+    await m.edit_text("✅ نام تغییر کرد.")
 
 
 @cmd("uptime")
-async def _(event, arg):
+async def _(m, arg):
     s = int(time.time() - START)
-    await event.edit(f"⏱ {s // 3600}h {s % 3600 // 60}m {s % 60}s")
+    await m.edit_text(f"⏱ {s // 3600}h {s % 3600 // 60}m {s % 60}s")
 
 
 @cmd("me")
-async def _(event, arg):
-    m = await user.get_me()
-    await event.edit(f"👤 {m.first_name} {m.last_name or ''}\n🆔 `{m.id}`\n🔗 @{m.username or '-'}")
+async def _(m, arg):
+    me = await user.get_me()
+    await m.edit_text(f"👤 {me.first_name} {me.last_name or ''}\n🆔 `{me.id}`\n🔗 @{me.username or '-'}")
 
 
 @cmd("ver")
-async def _(event, arg):
-    await event.edit(f"🐍 Python {platform.python_version()}\n📦 Telethon {telethon.__version__}")
+async def _(m, arg):
+    await m.edit_text(f"🐍 Python {platform.python_version()}\n📦 Pyrofork {pyrogram.__version__}")
 
 
 # --- گروه ---
 @cmd("members")
-async def _(event, arg):
-    p = await user.get_participants(event.chat_id, limit=0)
-    await event.edit(f"👥 تعداد اعضا: {p.total}")
+async def _(m, arg):
+    await m.edit_text(f"👥 تعداد اعضا: {await user.get_chat_members_count(m.chat.id)}")
 
 
 @cmd("admins")
-async def _(event, arg):
+async def _(m, arg):
     names = []
-    async for u in user.iter_participants(event.chat_id, filter=types.ChannelParticipantsAdmins):
-        names.append(f"• {u.first_name or ''} (@{u.username or '-'})")
-    await event.edit("👮 ادمین‌ها:\n" + "\n".join(names[:30]))
+    async for mem in user.get_chat_members(m.chat.id, filter=enums.ChatMembersFilter.ADMINISTRATORS):
+        u = mem.user
+        if u:
+            names.append(f"• {u.first_name or ''} (@{u.username or '-'})")
+    await m.edit_text("👮 ادمین‌ها:\n" + "\n".join(names[:30]))
 
 
 @cmd("pin")
-async def _(event, arg):
-    r = await event.get_reply_message()
+async def _(m, arg):
+    r = m.reply_to_message
     if r:
         await r.pin()
-    await event.delete()
+    await m.delete()
 
 
 @cmd("unpin")
-async def _(event, arg):
-    r = await event.get_reply_message()
+async def _(m, arg):
+    r = m.reply_to_message
     if r:
         await r.unpin()
-    await event.delete()
+    await m.delete()
 
 
 @cmd("purge")
-async def _(event, arg):
+async def _(m, arg):
     n = min(int(arg or 5), 100)
-    ids = [m.id async for m in user.iter_messages(event.chat_id, from_user="me", limit=n + 1)]
-    await user.delete_messages(event.chat_id, ids)
+    ids = [x.id async for x in user.search_messages(m.chat.id, from_user="me", limit=n + 1)]
+    if m.id not in ids:
+        ids.append(m.id)
+    await user.delete_messages(m.chat.id, ids)
 
 
 @cmd("whois")
-async def _(event, arg):
-    r = await event.get_reply_message()
-    if not r:
-        return await event.edit("روی پیام یک نفر ریپلای کنید.")
-    u = await r.get_sender()
-    await event.edit(f"🔎 {getattr(u, 'first_name', '')}\n🆔 `{u.id}`\n🔗 @{getattr(u, 'username', None) or '-'}")
+async def _(m, arg):
+    r = m.reply_to_message
+    if not r or not r.from_user:
+        return await m.edit_text("روی پیام یک نفر ریپلای کنید.")
+    u = r.from_user
+    await m.edit_text(f"🔎 {u.first_name or ''}\n🆔 `{u.id}`\n🔗 @{u.username or '-'}")
 
 
 # --- سرگرمی ---
 def dicecmd(name, emoji):
-    async def h(event, arg):
-        await event.delete()
-        await user.send_file(event.chat_id, types.InputMediaDice(emoji))
+    async def h(m, arg):
+        await m.delete()
+        await user.send_dice(m.chat.id, emoji)
     CMD[name] = h
 
 
@@ -521,32 +538,32 @@ for n, e in [("dice", "🎲"), ("dart", "🎯"), ("basket", "🏀"),
 
 # --- زمان و وضعیت ---
 @cmd("afk")
-async def _(event, arg):
+async def _(m, arg):
     S["afk"] = arg or "نیستم"
     save()
-    await event.edit(f"😴 AFK روشن شد: {S['afk']}")
+    await m.edit_text(f"😴 AFK روشن شد: {S['afk']}")
 
 
 @cmd("unafk")
-async def _(event, arg):
+async def _(m, arg):
     S.pop("afk", None)
     save()
-    await event.edit("✅ AFK خاموش شد.")
+    await m.edit_text("✅ AFK خاموش شد.")
 
 
 @cmd("sd")
-async def _(event, arg):
+async def _(m, arg):
     n, _, txt = arg.partition(" ")
-    await event.edit(txt)
+    await m.edit_text(txt)
     await asyncio.sleep(min(int(n), 3600))
-    await event.delete()
+    await m.delete()
 
 
 @cmd("later")
-async def _(event, arg):
+async def _(m, arg):
     n, _, txt = arg.partition(" ")
-    chat = event.chat_id
-    await event.edit(f"⏳ ارسال می‌شود بعد از {n} ثانیه")
+    chat = m.chat.id
+    await m.edit_text(f"⏳ ارسال می‌شود بعد از {n} ثانیه")
 
     async def go():
         await asyncio.sleep(min(int(n), 86400))
@@ -554,7 +571,6 @@ async def _(event, arg):
     asyncio.create_task(go())
 
 
-# ---------------- هندلر پیام‌های خروجی ----------------
 # ---------------- ایموجی پریمیوم ----------------
 EMOJI_MAP = {}  # ایموجی ساده -> document_id ایموجی پریمیوم
 
@@ -564,72 +580,74 @@ def _norm(e):
 
 
 async def load_pack(short):
-    r = await user(GetStickerSetRequest(types.InputStickerSetShortName(short), hash=0))
-    m = {}
+    r = await user.invoke(raw.functions.messages.GetStickerSet(
+        stickerset=raw.types.InputStickerSetShortName(short_name=short), hash=0))
+    mp = {}
     for p in r.packs:
         if p.documents:
-            m.setdefault(_norm(p.emoticon), p.documents[0])
-    return m
+            mp.setdefault(_norm(p.emoticon), p.documents[0])
+    return mp
 
 
 def pe_entities(text):
     ents, off = [], 0
     for ch in text:
-        n = len(add_surrogate(ch))
+        n = u16(ch)
         if ch == "\ufe0f":
             if ents and ents[-1].offset + ents[-1].length == off:
                 ents[-1].length += n
         elif ch in EMOJI_MAP:
-            ents.append(types.MessageEntityCustomEmoji(
-                offset=off, length=n, document_id=EMOJI_MAP[ch]))
+            ents.append(MessageEntity(type=ET.CUSTOM_EMOJI, offset=off, length=n,
+                                      custom_emoji_id=EMOJI_MAP[ch]))
         off += n
     return ents
 
 
 @cmd("setpack")
-async def _(event, arg):
+async def _(m, arg):
     short = arg.strip().split("/")[-1]
     EMOJI_MAP.clear()
     EMOJI_MAP.update(await load_pack(short))
     S["pe_pack"] = short
     save()
-    warn = "" if getattr(ME, "premium", False) else "\n⚠️ اکانت شما پریمیوم نیست؛ ایموجی‌ها معمولی نمایش داده می‌شوند."
-    await event.edit(f"✅ پک `{short}` لود شد ({len(EMOJI_MAP)} ایموجی){warn}")
+    warn = "" if getattr(ME, "is_premium", False) else "\n⚠️ اکانت شما پریمیوم نیست؛ ایموجی‌ها معمولی نمایش داده می‌شوند."
+    await m.edit_text(f"✅ پک `{short}` لود شد ({len(EMOJI_MAP)} ایموجی){warn}")
 
 
 @cmd("pe")
-async def _(event, arg):
-    t = await get_text(event, arg)
+async def _(m, arg):
+    t = await get_text(m, arg)
     if not t:
         return
     if not EMOJI_MAP:
-        return await event.edit("اول با `.setpack` یک پک ایموجی انتخاب کنید.")
-    await event.edit(t, formatting_entities=pe_entities(t))
+        return await m.edit_text("اول با `.setpack` یک پک ایموجی انتخاب کنید.")
+    await m.edit_text(t, entities=pe_entities(t))
 
 
 @cmd("emojilist")
-async def _(event, arg):
-    await event.edit("🧩 " + (" ".join(EMOJI_MAP)[:3500] or "پکی انتخاب نشده"))
+async def _(m, arg):
+    await m.edit_text("🧩 " + (" ".join(EMOJI_MAP)[:3500] or "پکی انتخاب نشده"),
+                      parse_mode=PM.DISABLED)
 
 
 @cmd("ceid")
-async def _(event, arg):
-    r = await event.get_reply_message()
-    ids = [str(e.document_id) for e in (r.entities or [])
-           if isinstance(e, types.MessageEntityCustomEmoji)] if r else []
-    await event.edit("🆔 " + ("\n".join(f"`{i}`" for i in ids) if ids
+async def _(m, arg):
+    r = m.reply_to_message
+    ids = [str(e.custom_emoji_id) for e in ((r.entities or r.caption_entities or []) if r else [])
+           if e.type == ET.CUSTOM_EMOJI]
+    await m.edit_text("🆔 " + ("\n".join(f"`{i}`" for i in ids) if ids
                               else "روی پیامی که ایموجی پریمیوم دارد ریپلای کنید."))
 
 
 @cmd("ce")
-async def _(event, arg):
+async def _(m, arg):
     i, _, emo = arg.partition(" ")
     emo = emo.strip() or "⭐"
-    await event.edit(emo, formatting_entities=[types.MessageEntityCustomEmoji(
-        offset=0, length=len(add_surrogate(emo)), document_id=int(i))])
+    await m.edit_text(emo, entities=[MessageEntity(
+        type=ET.CUSTOM_EMOJI, offset=0, length=u16(emo), custom_emoji_id=int(i))])
 
 
-# =============== پیاده‌سازی صفحه‌های ۱۲ تا ۲۰ ===============
+# =============== ابزارهای کمکی ===============
 def _http(url, binary=False, timeout=15):
     req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
     with urllib.request.urlopen(req, timeout=timeout) as r:
@@ -641,11 +659,11 @@ async def fetch(url, binary=False):
     return await asyncio.get_running_loop().run_in_executor(None, _http, url, binary)
 
 
-async def target(event):
-    r = await event.get_reply_message()
-    if not r:
+async def target(m):
+    r = m.reply_to_message
+    if not r or not r.from_user:
         raise ValueError("روی پیام فرد ریپلای کنید")
-    return r.sender_id
+    return r.from_user.id
 
 
 async def _del_later(chat, mid, secs):
@@ -656,73 +674,81 @@ async def _del_later(chat, mid, secs):
         pass
 
 
-# ---- ۱۲: حریم و امنیت ----
+# ---- حریم و امنیت ----
 MSG_CACHE = collections.OrderedDict()
 
 
-@user.on(events.NewMessage(incoming=True))
-async def cache_in(event):
-    if event.is_private and (S.get("antidel") or S.get("antiedit")):
-        MSG_CACHE[event.id] = (event.sender_id, event.raw_text or "<مدیا>")
+@user.on_message(filters.incoming & filters.private, group=1)
+async def cache_in(_, m):
+    if S.get("antidel") or S.get("antiedit"):
+        MSG_CACHE[m.id] = (sid(m), m.text or m.caption or "<مدیا>")
         while len(MSG_CACHE) > 3000:
             MSG_CACHE.popitem(last=False)
 
 
-@user.on(events.MessageDeleted)
-async def on_deleted(event):
+@user.on_deleted_messages()
+async def on_deleted(_, msgs):
     if not S.get("antidel"):
         return
-    for i in event.deleted_ids:
-        if i in MSG_CACHE:
-            sid, t = MSG_CACHE.pop(i)
-            await user.send_message("me", f"🗑 پیام حذف‌شده از `{sid}`:\n{t}")
+    for x in msgs:
+        if x.id in MSG_CACHE:
+            who, t = MSG_CACHE.pop(x.id)
+            await user.send_message("me", f"🗑 پیام حذف‌شده از `{who}`:\n{t}",
+                                    parse_mode=PM.DISABLED)
 
 
-@user.on(events.MessageEdited(incoming=True))
-async def on_edited(event):
-    if not (S.get("antiedit") and event.is_private):
+@user.on_edited_message(filters.incoming & filters.private)
+async def on_edited(_, m):
+    if not S.get("antiedit"):
         return
-    old = MSG_CACHE.get(event.id)
-    new = event.raw_text or "<مدیا>"
+    old = MSG_CACHE.get(m.id)
+    new = m.text or m.caption or "<مدیا>"
     if old and old[1] != new:
-        await user.send_message("me", f"✏️ ویرایش از `{old[0]}`:\nقبل: {old[1]}\nبعد: {new}")
-    MSG_CACHE[event.id] = (event.sender_id, new)
+        await user.send_message("me", f"✏️ ویرایش از `{old[0]}`:\nقبل: {old[1]}\nبعد: {new}",
+                                parse_mode=PM.DISABLED)
+    MSG_CACHE[m.id] = (sid(m), new)
 
 
 @cmd("mute")
-async def _(event, arg):
-    peer = await user.get_input_entity(event.chat_id)
+async def _(m, arg):
+    peer = await user.resolve_peer(m.chat.id)
     until = 0 if arg == "off" else 2 ** 31 - 1
-    await user(functions.account.UpdateNotifySettingsRequest(
-        peer=types.InputNotifyPeer(peer),
-        settings=types.InputPeerNotifySettings(mute_until=until)))
-    await event.edit("🔕 بی‌صدا شد." if until else "🔔 صدا فعال شد.")
+    await user.invoke(raw.functions.account.UpdateNotifySettings(
+        peer=raw.types.InputNotifyPeer(peer=peer),
+        settings=raw.types.InputPeerNotifySettings(mute_until=until)))
+    await m.edit_text("🔕 بی‌صدا شد." if until else "🔔 صدا فعال شد.")
 
 
 @cmd("archive")
-async def _(event, arg):
-    await user.edit_folder(event.chat_id, 0 if arg == "off" else 1)
-    await event.edit("📦 انجام شد.")
+async def _(m, arg):
+    if arg == "off":
+        await user.unarchive_chats(m.chat.id)
+    else:
+        await user.archive_chats(m.chat.id)
+    await m.edit_text("📦 انجام شد.")
 
 
 @cmd("block")
-async def _(event, arg):
-    r = await event.get_reply_message()
-    peer = await user.get_input_entity(r.sender_id if r else event.chat_id)
-    req = functions.contacts.UnblockRequest if arg == "off" else functions.contacts.BlockRequest
-    await user(req(peer))
-    await event.edit("✅ انجام شد.")
+async def _(m, arg):
+    r = m.reply_to_message
+    uid = r.from_user.id if (r and r.from_user) else m.chat.id
+    if arg == "off":
+        await user.unblock_user(uid)
+    else:
+        await user.block_user(uid)
+    await m.edit_text("✅ انجام شد.")
 
 
 @cmd("sessions")
-async def _(event, arg):
-    r = await user(functions.account.GetAuthorizationsRequest())
+async def _(m, arg):
+    r = await user.invoke(raw.functions.account.GetAuthorizations())
     lines = [f"{'🟢' if a.current else '⚪'} {a.device_model} · {a.app_name} · "
-             f"{a.country or '-'} · {a.date_active:%m-%d %H:%M}" for a in r.authorizations]
-    await event.edit("🔐 نشست‌های فعال:\n" + "\n".join(lines[:15]))
+             f"{a.country or '-'} · {dt.datetime.fromtimestamp(a.date_active):%m-%d %H:%M}"
+             for a in r.authorizations]
+    await m.edit_text("🔐 نشست‌های فعال:\n" + "\n".join(lines[:15]), parse_mode=PM.DISABLED)
 
 
-# ---- ۱۳: متن پیشرفته ----
+# ---- متن پیشرفته ----
 def _mk(up, lo):
     def f(t):
         out = []
@@ -749,11 +775,12 @@ FONTS = {
 
 
 @cmd("font")
-async def _(event, arg):
+async def _(m, arg):
     k, _, t = arg.partition(" ")
     if k not in FONTS or not t.strip():
-        return await event.edit("🔤 فونت‌ها:\n" + "\n".join(f"{i}. {n[0]}: {n[1]('Abc')}" for i, n in FONTS.items()))
-    await event.edit(FONTS[k][1](t))
+        return await m.edit_text("🔤 فونت‌ها:\n" + "\n".join(
+            f"{i}. {n[0]}: {n[1]('Abc')}" for i, n in FONTS.items()))
+    await m.edit_text(FONTS[k][1](t), parse_mode=PM.DISABLED)
 
 
 MORSE = {"A": ".-", "B": "-...", "C": "-.-.", "D": "-..", "E": ".", "F": "..-.", "G": "--.",
@@ -766,45 +793,45 @@ MORSE_REV = {v: k for k, v in MORSE.items()}
 
 
 @cmd("morse")
-async def _(event, arg):
-    t = await get_text(event, arg)
+async def _(m, arg):
+    t = await get_text(m, arg)
     if t and set(t) <= set(".-/ "):
         out = " ".join("".join(MORSE_REV.get(c, "?") for c in w.split()) for w in t.split("/"))
     else:
         out = " / ".join(" ".join(MORSE.get(c.upper(), "?") for c in w) for w in t.split())
-    await event.edit(out)
+    await m.edit_text(out, parse_mode=PM.DISABLED)
 
 
 @cmd("bin")
-async def _(event, arg):
-    t = await get_text(event, arg)
+async def _(m, arg):
+    t = await get_text(m, arg)
     if t and set(t) <= set("01 "):
         out = bytes(int(b, 2) for b in t.split()).decode(errors="ignore")
     else:
         out = " ".join(f"{b:08b}" for b in t.encode())
-    await event.edit(out)
+    await m.edit_text(out, parse_mode=PM.DISABLED)
 
 
 textcmd("rot13", lambda t: codecs.encode(t, "rot13"))
 
 
 @cmd("wc")
-async def _(event, arg):
-    t = await get_text(event, arg)
-    await event.edit(f"🔢 کاراکتر: {len(t)}\n📝 کلمه: {len(t.split())}\n📄 خط: {len(t.splitlines())}")
+async def _(m, arg):
+    t = await get_text(m, arg)
+    await m.edit_text(f"🔢 کاراکتر: {len(t)}\n📝 کلمه: {len(t.split())}\n📄 خط: {len(t.splitlines())}")
 
 
 @cmd("hash")
-async def _(event, arg):
-    t = await get_text(event, arg)
+async def _(m, arg):
+    t = await get_text(m, arg)
     b = t.encode()
-    await event.edit(f"🔑 MD5:\n`{hashlib.md5(b).hexdigest()}`\nSHA1:\n`{hashlib.sha1(b).hexdigest()}`\n"
-                     f"SHA256:\n`{hashlib.sha256(b).hexdigest()}`")
+    await m.edit_text(f"🔑 MD5:\n`{hashlib.md5(b).hexdigest()}`\nSHA1:\n`{hashlib.sha1(b).hexdigest()}`\n"
+                      f"SHA256:\n`{hashlib.sha256(b).hexdigest()}`")
 
 
-# ---- ۱۴: کارهای روزمره ----
+# ---- کارهای روزمره ----
 @cmd("todo")
-async def _(event, arg):
+async def _(m, arg):
     L = S.setdefault("todo", [])
     sub, _, rest = arg.partition(" ")
     if sub == "add" and rest:
@@ -814,50 +841,47 @@ async def _(event, arg):
     elif sub == "clear":
         L.clear()
     save()
-    await event.edit("📝 کارها:\n" + ("\n".join(f"{i}. {x}" for i, x in enumerate(L, 1)) or "خالی"))
+    await m.edit_text("📝 کارها:\n" + ("\n".join(f"{i}. {x}" for i, x in enumerate(L, 1)) or "خالی"),
+                      parse_mode=PM.DISABLED)
 
 
 @cmd("note")
-async def _(event, arg):
+async def _(m, arg):
     N = S.setdefault("notes", {})
     sub, _, rest = arg.partition(" ")
     if sub == "get":
-        return await event.edit(N.get(rest.strip(), "پیدا نشد"))
+        return await m.edit_text(N.get(rest.strip(), "پیدا نشد"), parse_mode=PM.DISABLED)
     if sub == "save":
         name, _, txt = rest.partition(" ")
-        N[name] = txt or await get_text(event, "")
+        N[name] = txt or await get_text(m, "")
     elif sub == "del":
         N.pop(rest.strip(), None)
     save()
-    await event.edit("🗒 یادداشت‌ها: " + (", ".join(N) or "خالی"))
+    await m.edit_text("🗒 یادداشت‌ها: " + (", ".join(N) or "خالی"), parse_mode=PM.DISABLED)
 
 
 @cmd("remind")
-async def _(event, arg):
-    m = re.match(r"(\d+)([smhd])\s+(.+)", arg)
-    if not m:
+async def _(m, arg):
+    mt = re.match(r"(\d+)([smhd])\s+(.+)", arg)
+    if not mt:
         raise ValueError("مثال: .remind 10m تماس بگیر")
-    secs = int(m[1]) * {"s": 1, "m": 60, "h": 3600, "d": 86400}[m[2]]
-    msg = m[3]
+    secs = int(mt[1]) * {"s": 1, "m": 60, "h": 3600, "d": 86400}[mt[2]]
+    msg = mt[3]
 
     async def go():
         await asyncio.sleep(secs)
-        await user.send_message("me", f"⏰ یادآوری: {msg}")
+        await user.send_message("me", f"⏰ یادآوری: {msg}", parse_mode=PM.DISABLED)
     asyncio.create_task(go())
-    await event.edit(f"⏰ یادآوری ثبت شد (تا ری‌استارت بات معتبر است).")
+    await m.edit_text("⏰ یادآوری ثبت شد (تا ری‌استارت بات معتبر است).")
 
 
 @cmd("poll")
-async def _(event, arg):
+async def _(m, arg):
     q, *opts = [x.strip() for x in arg.split("|")]
     if len(opts) < 2:
         raise ValueError("حداقل دو گزینه لازم است")
-    TW = getattr(types, "TextWithEntities", None)
-    mk = (lambda s: TW(s, [])) if TW else (lambda s: s)
-    poll = types.Poll(id=random.randint(1, 2 ** 31), question=mk(q),
-                      answers=[types.PollAnswer(mk(o), bytes([i])) for i, o in enumerate(opts[:10])])
-    await event.delete()
-    await user.send_file(event.chat_id, types.InputMediaPoll(poll=poll))
+    await m.delete()
+    await user.send_poll(m.chat.id, q, opts[:10])
 
 
 LEN = {"m": 1, "km": 1000, "cm": 0.01, "mm": 0.001, "mi": 1609.344, "ft": 0.3048, "in": 0.0254}
@@ -865,7 +889,7 @@ MASS = {"kg": 1, "g": 0.001, "lb": 0.45359237, "oz": 0.0283495}
 
 
 @cmd("convert")
-async def _(event, arg):
+async def _(m, arg):
     v, a, b = arg.split()
     v, a, b = float(v), a.lower(), b.lower()
     if a in ("c", "f", "k") and b in ("c", "f", "k"):
@@ -878,46 +902,48 @@ async def _(event, arg):
                 break
         else:
             raise ValueError("واحد نامعتبر")
-    await event.edit(f"📐 {v:g} {a} = `{r:.4g}` {b}")
+    await m.edit_text(f"📐 {v:g} {a} = `{r:.4g}` {b}")
 
 
 @cmd("age")
-async def _(event, arg):
+async def _(m, arg):
     b = dt.datetime.strptime(arg.strip(), "%Y-%m-%d").date()
     t = dt.date.today()
     y = t.year - b.year - ((t.month, t.day) < (b.month, b.day))
-    await event.edit(f"🎂 سن: {y} سال | {(t - b).days:,} روز")
+    await m.edit_text(f"🎂 سن: {y} سال | {(t - b).days:,} روز")
 
 
-# ---- ۱۵: اینترنت ----
+# ---- اینترنت ----
 @cmd("weather")
-async def _(event, arg):
-    await event.edit("🌦 " + (await fetch(f"https://wttr.in/{urllib.parse.quote(arg)}?format=3")).strip())
+async def _(m, arg):
+    await m.edit_text("🌦 " + (await fetch(f"https://wttr.in/{urllib.parse.quote(arg)}?format=3")).strip(),
+                      parse_mode=PM.DISABLED)
 
 
 @cmd("ip")
-async def _(event, arg):
+async def _(m, arg):
     d = json.loads(await fetch(f"http://ip-api.com/json/{urllib.parse.quote(arg)}"))
     if d.get("status") != "success":
         raise ValueError("IP نامعتبر")
-    await event.edit(f"🌍 {d['query']}\n{d['country']} / {d['regionName']} / {d['city']}\n🏢 {d['isp']}")
+    await m.edit_text(f"🌍 {d['query']}\n{d['country']} / {d['regionName']} / {d['city']}\n🏢 {d['isp']}",
+                      parse_mode=PM.DISABLED)
 
 
 @cmd("short")
-async def _(event, arg):
+async def _(m, arg):
     u = await fetch(f"https://is.gd/create.php?format=simple&url={urllib.parse.quote(arg)}")
-    await event.edit(f"🔗 {u.strip()}")
+    await m.edit_text(f"🔗 {u.strip()}", parse_mode=PM.DISABLED)
 
 
 @cmd("qr")
-async def _(event, arg):
-    t = await get_text(event, arg)
+async def _(m, arg):
+    t = await get_text(m, arg)
     data = await fetch("https://api.qrserver.com/v1/create-qr-code/?size=400x400&data="
                        + urllib.parse.quote(t), True)
     bio = io.BytesIO(data)
     bio.name = "qr.png"
-    await event.delete()
-    await user.send_file(event.chat_id, bio, caption=f"📱 {t[:100]}")
+    await m.delete()
+    await user.send_photo(m.chat.id, bio, caption=f"📱 {t[:100]}", parse_mode=PM.DISABLED)
 
 
 CRYPTO = {"btc": "bitcoin", "eth": "ethereum", "ton": "the-open-network",
@@ -925,102 +951,113 @@ CRYPTO = {"btc": "bitcoin", "eth": "ethereum", "ton": "the-open-network",
 
 
 @cmd("crypto")
-async def _(event, arg):
+async def _(m, arg):
     cid = CRYPTO.get(arg.lower(), arg.lower())
     d = json.loads(await fetch("https://api.coingecko.com/api/v3/simple/price?ids="
                                f"{cid}&vs_currencies=usd&include_24hr_change=true"))[cid]
-    await event.edit(f"💰 {cid}: ${d['usd']:,}  ({d.get('usd_24h_change', 0):+.2f}% در ۲۴ ساعت)")
+    await m.edit_text(f"💰 {cid}: ${d['usd']:,}  ({d.get('usd_24h_change', 0):+.2f}% در ۲۴ ساعت)",
+                      parse_mode=PM.DISABLED)
 
 
 @cmd("wiki")
-async def _(event, arg):
+async def _(m, arg):
     parts = arg.split(maxsplit=1)
     lang, title = ("en", arg)
     if len(parts) == 2 and len(parts[0]) == 2:
         lang, title = parts
     d = json.loads(await fetch(f"https://{lang}.wikipedia.org/api/rest_v1/page/summary/"
                                + urllib.parse.quote(title.replace(" ", "_"))))
-    await event.edit(f"📚 **{d.get('title', title)}**\n{d.get('extract', 'نتیجه‌ای نبود')[:1500]}")
+    await m.edit_text(f"📚 **{d.get('title', title)}**\n{d.get('extract', 'نتیجه‌ای نبود')[:1500]}",
+                      parse_mode=PM.DISABLED)
 
 
-# ---- ۱۶: مدیا و پروفایل ----
-async def need_reply(event):
-    r = await event.get_reply_message()
+# ---- مدیا و پروفایل ----
+async def need_reply(m):
+    r = m.reply_to_message
     if not r:
         raise ValueError("روی یک پیام ریپلای کنید")
     return r
 
 
 @cmd("download")
-async def _(event, arg):
-    r = await need_reply(event)
+async def _(m, arg):
+    r = await need_reply(m)
     os.makedirs("downloads", exist_ok=True)
-    await event.edit("📥 در حال دانلود...")
-    p = await r.download_media(file="downloads/")
+    await m.edit_text("📥 در حال دانلود...")
+    p = await r.download(file_name="downloads/")
     if not p:
         raise ValueError("این پیام مدیا ندارد")
-    await event.edit(f"✅ ذخیره شد: `{p}` ({os.path.getsize(p) / 1e6:.2f} MB)")
+    await m.edit_text(f"✅ ذخیره شد: `{p}` ({os.path.getsize(p) / 1e6:.2f} MB)")
 
 
 @cmd("fileinfo")
-async def _(event, arg):
-    f = (await need_reply(event)).file
+async def _(m, arg):
+    r = await need_reply(m)
+    f = getattr(r, r.media.value, None) if r.media else None
     if not f:
         raise ValueError("این پیام فایل ندارد")
-    await event.edit(f"📄 نام: {f.name or '-'}\n🧩 نوع: {f.mime_type}\n"
-                     f"💾 حجم: {(f.size or 0) / 1e6:.2f} MB\n⏱ مدت: {f.duration or '-'}\n"
-                     f"📐 ابعاد: {f.width or '-'}×{f.height or '-'}")
+    await m.edit_text(f"📄 نام: {getattr(f, 'file_name', None) or '-'}\n"
+                      f"🧩 نوع: {getattr(f, 'mime_type', None) or r.media.name}\n"
+                      f"💾 حجم: {(getattr(f, 'file_size', 0) or 0) / 1e6:.2f} MB\n"
+                      f"⏱ مدت: {getattr(f, 'duration', None) or '-'}\n"
+                      f"📐 ابعاد: {getattr(f, 'width', None) or '-'}×{getattr(f, 'height', None) or '-'}",
+                      parse_mode=PM.DISABLED)
 
 
 @cmd("asdoc")
-async def _(event, arg):
-    r = await need_reply(event)
-    await event.delete()
-    await user.send_file(event.chat_id, r.media, force_document=True)
+async def _(m, arg):
+    r = await need_reply(m)
+    await m.delete()
+    p = await r.download()
+    if not p:
+        return
+    try:
+        await user.send_document(m.chat.id, p)
+    finally:
+        os.remove(p)
 
 
 @cmd("pfp")
-async def _(event, arg):
-    r = await event.get_reply_message()
-    s = await r.get_sender() if r else await event.get_chat()
-    data = await user.download_profile_photo(s, file=bytes)
-    if not data:
+async def _(m, arg):
+    r = m.reply_to_message
+    cid = r.from_user.id if (r and r.from_user) else m.chat.id
+    photos = [p async for p in user.get_chat_photos(cid, limit=1)]
+    if not photos:
         raise ValueError("عکس پروفایل ندارد")
-    bio = io.BytesIO(data)
+    bio = await user.download_media(photos[0].file_id, in_memory=True)
     bio.name = "pfp.jpg"
-    await event.delete()
-    await user.send_file(event.chat_id, bio)
+    await m.delete()
+    await user.send_photo(m.chat.id, bio)
 
 
 @cmd("setpfp")
-async def _(event, arg):
-    r = await need_reply(event)
+async def _(m, arg):
+    r = await need_reply(m)
     os.makedirs("downloads", exist_ok=True)
-    p = await r.download_media(file="downloads/pfp_new")
-    f = await user.upload_file(p)
-    await user(functions.photos.UploadProfilePhotoRequest(file=f))
-    await event.edit("✅ عکس پروفایل تغییر کرد.")
+    p = await r.download(file_name="downloads/pfp_new.jpg")
+    await user.set_profile_photo(photo=p)
+    await m.edit_text("✅ عکس پروفایل تغییر کرد.")
 
 
 @cmd("delpfp")
-async def _(event, arg):
-    photos = await user.get_profile_photos("me", limit=1)
+async def _(m, arg):
+    photos = [p async for p in user.get_chat_photos("me", limit=1)]
     if not photos:
         raise ValueError("عکسی وجود ندارد")
-    await user(functions.photos.DeletePhotosRequest([telethon.utils.get_input_photo(p) for p in photos]))
-    await event.edit("🗑 آخرین عکس پروفایل حذف شد.")
+    await user.delete_profile_photos(photos[0].file_id)
+    await m.edit_text("🗑 آخرین عکس پروفایل حذف شد.")
 
 
-# ---- ۱۷: بازی و شوخی ----
+# ---- بازی و شوخی ----
 @cmd("rps")
-async def _(event, arg):
+async def _(m, arg):
     names = {"r": "🪨 سنگ", "p": "📄 کاغذ", "s": "✂️ قیچی"}
     me_, bot_ = arg.strip().lower()[:1], random.choice("rps")
     if me_ not in names:
         raise ValueError("r یا p یا s بنویسید")
     win = {("r", "s"), ("p", "r"), ("s", "p")}
     res = "🤝 مساوی" if me_ == bot_ else ("🏆 بردی" if (me_, bot_) in win else "😅 باختی")
-    await event.edit(f"شما: {names[me_]}\nبات: {names[bot_]}\n{res}")
+    await m.edit_text(f"شما: {names[me_]}\nبات: {names[bot_]}\n{res}")
 
 
 BALL = ["حتماً ✅", "بدون شک 👌", "به نظر میاد آره 🙂", "هنوز مطمئن نیستم 🤔", "دوباره بپرس 🔄",
@@ -1028,8 +1065,8 @@ BALL = ["حتماً ✅", "بدون شک 👌", "به نظر میاد آره �
 
 
 @cmd("8ball")
-async def _(event, arg):
-    await event.edit(f"🎱 {arg}\n➜ {random.choice(BALL)}")
+async def _(m, arg):
+    await m.edit_text(f"🎱 {arg}\n➜ {random.choice(BALL)}", parse_mode=PM.DISABLED)
 
 
 TRUTH = ["آخرین دروغی که گفتی چی بود؟", "بزرگ‌ترین ترست چیه؟", "خنده‌دارترین اتفاق عمرت؟",
@@ -1039,45 +1076,46 @@ DARE = ["یه استیکر خنده‌دار بفرست ✨", "تا ۱۰ دقی�
 
 
 @cmd("td")
-async def _(event, arg):
+async def _(m, arg):
     k = arg.strip().lower() or random.choice(["truth", "dare"])
-    await event.edit(("🤔 حقیقت: " + random.choice(TRUTH)) if k.startswith("t")
-                     else ("😈 جرأت: " + random.choice(DARE)))
+    await m.edit_text(("🤔 حقیقت: " + random.choice(TRUTH)) if k.startswith("t")
+                      else ("😈 جرأت: " + random.choice(DARE)))
 
 
 @cmd("love")
-async def _(event, arg):
+async def _(m, arg):
     a, _, b = arg.partition("|")
     pct = int(hashlib.md5((a.strip() + b.strip()).lower().encode()).hexdigest(), 16) % 101
-    await event.edit(f"💘 {a.strip()} ❤️ {b.strip()}\n{'█' * (pct // 10)}{'░' * (10 - pct // 10)} {pct}%")
+    await m.edit_text(f"💘 {a.strip()} ❤️ {b.strip()}\n{'█' * (pct // 10)}{'░' * (10 - pct // 10)} {pct}%",
+                      parse_mode=PM.DISABLED)
 
 
 @cmd("hack")
-async def _(event, arg):
+async def _(m, arg):
     steps = ["🎭 شوخی: شروع هک...", "🔍 اسکن پورت‌ها... 23%", "🔓 دور زدن فایروال... 57%",
              "📡 دانلود اطلاعات... 91%", "✅ هک شد! (شوخی بود 😄)"]
     for s in steps:
-        await event.edit(s)
+        await m.edit_text(s)
         await asyncio.sleep(1)
 
 
 @cmd("bar")
-async def _(event, arg):
+async def _(m, arg):
     for p in range(0, 101, 20):
-        await event.edit(f"⏳ {'█' * (p // 10)}{'░' * (10 - p // 10)} {p}%")
+        await m.edit_text(f"⏳ {'█' * (p // 10)}{'░' * (10 - p // 10)} {p}%")
         await asyncio.sleep(0.8)
 
 
-# ---- ۱۸: اتوماسیون ----
+# ---- اتوماسیون ----
 @cmd("sign")
-async def _(event, arg):
+async def _(m, arg):
     S["sign_text"] = "" if arg in ("", "off") else arg
     save()
-    await event.edit("✅ امضا تنظیم شد." if S["sign_text"] else "✅ امضا خاموش شد.")
+    await m.edit_text("✅ امضا تنظیم شد." if S["sign_text"] else "✅ امضا خاموش شد.")
 
 
 @cmd("kw")
-async def _(event, arg):
+async def _(m, arg):
     K = S.setdefault("kw", {})
     sub, _, rest = arg.partition(" ")
     if sub == "add":
@@ -1086,236 +1124,255 @@ async def _(event, arg):
     elif sub == "del":
         K.pop(rest.strip().lower(), None)
     save()
-    await event.edit("🔑 کلیدواژه‌ها:\n" + ("\n".join(f"• {k} ➜ {v}" for k, v in K.items()) or "خالی"))
+    await m.edit_text("🔑 کلیدواژه‌ها:\n" + ("\n".join(f"• {k} ➜ {v}" for k, v in K.items()) or "خالی"),
+                      parse_mode=PM.DISABLED)
 
 
 @cmd("readall")
-async def _(event, arg):
+async def _(m, arg):
     n = 0
-    async for d in user.iter_dialogs():
-        if d.unread_count:
-            await user.send_read_acknowledge(d.entity)
+    async for d in user.get_dialogs():
+        if d.unread_messages_count:
+            await user.read_chat_history(d.chat.id)
             n += 1
-    await event.edit(f"✅ {n} چت خوانده‌شده علامت خورد.")
+    await m.edit_text(f"✅ {n} چت خوانده‌شده علامت خورد.")
 
 
 @cmd("backup")
-async def _(event, arg):
+async def _(m, arg):
     save()
-    await user.send_file("me", FILE, caption="💾 بکاپ تنظیمات")
-    await event.edit("✅ بکاپ در Saved Messages ارسال شد.")
+    await user.send_document("me", FILE, caption="💾 بکاپ تنظیمات")
+    await m.edit_text("✅ بکاپ در Saved Messages ارسال شد.")
 
 
 KW_COOL = {}
 
 
-@user.on(events.NewMessage(incoming=True))
-async def kw_in(event):
-    if not (S.get("kwreply") and event.is_private):
+@user.on_message(filters.incoming & filters.private, group=2)
+async def kw_in(_, m):
+    if not S.get("kwreply"):
         return
-    s = await event.get_sender()
-    if getattr(s, "bot", False):
+    if m.from_user and m.from_user.is_bot:
         return
-    txt = (event.raw_text or "").lower()
+    txt = (m.text or "").lower()
     for k, v in S.get("kw", {}).items():
-        if k and k in txt and time.time() - KW_COOL.get((event.sender_id, k), 0) > 600:
-            KW_COOL[(event.sender_id, k)] = time.time()
-            return await event.reply(v)
+        if k and k in txt and time.time() - KW_COOL.get((m.from_user.id, k), 0) > 600:
+            KW_COOL[(m.from_user.id, k)] = time.time()
+            return await m.reply_text(v, parse_mode=PM.DISABLED)
 
 
-# ---- ۱۹: مدیریت گروه (نیازمند دسترسی ادمین) ----
+# ---- مدیریت گروه (نیازمند دسترسی ادمین) ----
 @cmd("ban")
-async def _(event, arg):
-    uid = await target(event)
-    await user.edit_permissions(event.chat_id, uid, view_messages=(arg == "off"))
-    await event.edit("✅ آن‌بن شد." if arg == "off" else "🚫 بن شد.")
+async def _(m, arg):
+    uid = await target(m)
+    if arg == "off":
+        await user.unban_chat_member(m.chat.id, uid)
+        return await m.edit_text("✅ آن‌بن شد.")
+    await user.ban_chat_member(m.chat.id, uid)
+    await m.edit_text("🚫 بن شد.")
 
 
 @cmd("kick")
-async def _(event, arg):
-    uid = await target(event)
-    await user.edit_permissions(event.chat_id, uid, view_messages=False)
-    await user.edit_permissions(event.chat_id, uid, view_messages=True)
-    await event.edit("👢 اخراج شد.")
+async def _(m, arg):
+    uid = await target(m)
+    await user.ban_chat_member(m.chat.id, uid)
+    await user.unban_chat_member(m.chat.id, uid)
+    await m.edit_text("👢 اخراج شد.")
+
+
+async def _set_banned(chat_id, uid, until_ts, send_messages_banned):
+    await user.invoke(raw.functions.channels.EditBanned(
+        channel=await user.resolve_peer(chat_id),
+        participant=await user.resolve_peer(uid),
+        banned_rights=raw.types.ChatBannedRights(
+            until_date=until_ts, send_messages=send_messages_banned or None)))
 
 
 @cmd("muteu")
-async def _(event, arg):
-    uid = await target(event)
+async def _(m, arg):
+    uid = await target(m)
     if arg == "off":
-        await user.edit_permissions(event.chat_id, uid, send_messages=True)
-        return await event.edit("🔊 سکوت برداشته شد.")
+        await _set_banned(m.chat.id, uid, 0, False)
+        return await m.edit_text("🔊 سکوت برداشته شد.")
     mins = int(arg or 30)
-    until = dt.datetime.now(dt.timezone.utc) + dt.timedelta(minutes=mins)
-    await user.edit_permissions(event.chat_id, uid, until_date=until, send_messages=False)
-    await event.edit(f"🔇 {mins} دقیقه ساکت شد.")
+    until = int(time.time()) + mins * 60
+    await _set_banned(m.chat.id, uid, until, True)
+    await m.edit_text(f"🔇 {mins} دقیقه ساکت شد.")
 
 
 @cmd("promote")
-async def _(event, arg):
-    uid = await target(event)
+async def _(m, arg):
+    uid = await target(m)
     if arg == "off":
-        await user.edit_admin(event.chat_id, uid, is_admin=False)
-        return await event.edit("⬇️ از ادمینی برداشته شد.")
-    await user.edit_admin(event.chat_id, uid, delete_messages=True, ban_users=True,
-                          invite_users=True, pin_messages=True)
-    await event.edit("⬆️ ادمین شد.")
+        await user.promote_chat_member(m.chat.id, uid, privileges=ChatPrivileges(
+            can_manage_chat=False, can_delete_messages=False, can_restrict_members=False,
+            can_invite_users=False, can_pin_messages=False))
+        return await m.edit_text("⬇️ از ادمینی برداشته شد.")
+    await user.promote_chat_member(m.chat.id, uid, privileges=ChatPrivileges(
+        can_manage_chat=True, can_delete_messages=True, can_restrict_members=True,
+        can_invite_users=True, can_pin_messages=True))
+    await m.edit_text("⬆️ ادمین شد.")
 
 
 @cmd("gtitle")
-async def _(event, arg):
-    c = await event.get_chat()
-    if isinstance(c, types.Channel):
-        await user(functions.channels.EditTitleRequest(c, arg))
-    else:
-        await user(functions.messages.EditChatTitleRequest(c.id, arg))
-    await event.delete()
+async def _(m, arg):
+    await user.set_chat_title(m.chat.id, arg)
+    await m.delete()
 
 
 @cmd("slowmode")
-async def _(event, arg):
-    c = await event.get_chat()
-    await user(functions.channels.ToggleSlowModeRequest(c, int(arg or 0)))
-    await event.edit(f"🐌 حالت آهسته: {int(arg or 0)} ثانیه")
+async def _(m, arg):
+    sec = int(arg or 0)
+    await user.set_slow_mode(m.chat.id, sec or None)
+    await m.edit_text(f"🐌 حالت آهسته: {sec} ثانیه")
 
 
-# ---- ۲۰: ویژه ----
+# ---- ویژه ----
 @cmd("autodelsec")
-async def _(event, arg):
+async def _(m, arg):
     S["autodel_s"] = max(3, int(arg or 60))
     save()
-    await event.edit(f"⏱ زمان حذف خودکار: {S['autodel_s']} ثانیه")
+    await m.edit_text(f"⏱ زمان حذف خودکار: {S['autodel_s']} ثانیه")
 
 
 @cmd("export")
-async def _(event, arg):
+async def _(m, arg):
     n = min(int(arg or 100), 2000)
     lines = []
-    async for m in user.iter_messages(event.chat_id, limit=n):
-        who = "me" if m.out else m.sender_id
-        lines.append(f"[{m.date:%Y-%m-%d %H:%M}] {who}: {m.text or '<مدیا>'}")
+    async for x in user.get_chat_history(m.chat.id, limit=n):
+        who = "me" if x.outgoing else sid(x)
+        lines.append(f"[{x.date:%Y-%m-%d %H:%M}] {who}: {x.text or x.caption or '<مدیا>'}")
     bio = io.BytesIO("\n".join(reversed(lines)).encode())
     bio.name = "chat_export.txt"
-    await user.send_file("me", bio, caption=f"📤 خروجی {len(lines)} پیام")
-    await event.edit("✅ خروجی به Saved Messages ارسال شد.")
+    await user.send_document("me", bio, caption=f"📤 خروجی {len(lines)} پیام")
+    await m.edit_text("✅ خروجی به Saved Messages ارسال شد.")
 
 
 @cmd("search")
-async def _(event, arg):
+async def _(m, arg):
     out = []
-    async for m in user.iter_messages(event.chat_id, search=arg, limit=5):
-        out.append(f"#{m.id} ({m.date:%m-%d}): {(m.text or '')[:60]}")
-    await event.edit("🔎 نتایج:\n" + ("\n".join(out) or "چیزی پیدا نشد"))
+    async for x in user.search_messages(m.chat.id, query=arg, limit=5):
+        out.append(f"#{x.id} ({x.date:%m-%d}): {(x.text or x.caption or '')[:60]}")
+    await m.edit_text("🔎 نتایج:\n" + ("\n".join(out) or "چیزی پیدا نشد"), parse_mode=PM.DISABLED)
 
 
 @cmd("msgcount")
-async def _(event, arg):
-    res = await user.get_messages(event.chat_id, limit=0, from_user="me")
-    await event.edit(f"✉️ پیام‌های شما در این چت: {res.total}")
+async def _(m, arg):
+    total = await user.search_messages_count(m.chat.id, from_user="me")
+    await m.edit_text(f"✉️ پیام‌های شما در این چت: {total}")
 
 
 @cmd("top")
-async def _(event, arg):
+async def _(m, arg):
     c = collections.Counter()
-    async for m in user.iter_messages(event.chat_id, limit=500):
-        c[m.sender_id] += 1
+    async for x in user.get_chat_history(m.chat.id, limit=500):
+        uid = sid(x)
+        if uid:
+            c[uid] += 1
     lines = []
     for uid, n in c.most_common(5):
         try:
-            e = await user.get_entity(uid)
-            name = getattr(e, "first_name", None) or getattr(e, "title", None) or str(uid)
+            e = await user.get_chat(uid)
+            name = e.first_name or e.title or str(uid)
         except Exception:
             name = str(uid)
         lines.append(f"• {name}: {n}")
-    await event.edit("🏆 فعال‌ترین‌ها (۵۰۰ پیام اخیر):\n" + "\n".join(lines))
+    await m.edit_text("🏆 فعال‌ترین‌ها (۵۰۰ پیام اخیر):\n" + "\n".join(lines), parse_mode=PM.DISABLED)
 
 
 @cmd("restart")
-async def _(event, arg):
+async def _(m, arg):
     save()
-    await event.edit("♻️ در حال راه‌اندازی مجدد...")
+    await m.edit_text("♻️ در حال راه‌اندازی مجدد...")
     os.execv(sys.executable, [sys.executable] + sys.argv)
 
 
-STY = {"bold": types.MessageEntityBold, "italic": types.MessageEntityItalic,
-       "mono": types.MessageEntityCode, "underline": types.MessageEntityUnderline,
-       "strike": types.MessageEntityStrike, "spoiler": types.MessageEntitySpoiler}
+# ---------------- هندلر پیام‌های خروجی ----------------
+STY = {"bold": ET.BOLD, "italic": ET.ITALIC, "mono": ET.CODE, "underline": ET.UNDERLINE,
+       "strike": ET.STRIKETHROUGH, "spoiler": ET.SPOILER}
 
 
-async def style(event):
-    t = event.raw_text
-    if not t or event.media or event.message.entities:
+async def style(m):
+    t = m.text
+    if not t or m.media or m.entities or m.via_bot:
         return
     sign = S.get("sign_text")
     if sign:
         t = f"{t}\n\n{sign}"
-    n = len(add_surrogate(t))
-    ents = [c(offset=0, length=n) for k, c in STY.items() if S.get(k)]
+    n = u16(t)
+    ents = [MessageEntity(type=T, offset=0, length=n) for k, T in STY.items() if S.get(k)]
     if S.get("autope") and EMOJI_MAP:
         ents += pe_entities(t)
     if ents:
-        await event.edit(t, formatting_entities=ents)
+        await m.edit_text(t, entities=ents)
     elif sign:
-        await event.edit(t, parse_mode=None)
+        await m.edit_text(t, parse_mode=PM.DISABLED)
 
 
-@user.on(events.NewMessage(outgoing=True))
-async def out(event):
-    t = event.raw_text or ""
+@user.on_message(filters.me, group=0)
+async def out(_, m):
+    t = m.text or ""
     if t.startswith("."):
         name, _, arg = t[1:].partition(" ")
         name = name.lower()
         if name == "panel":
-            res = await user.inline_query(BOT_USERNAME, "panel")
-            await res[0].click(event.chat_id)
-            return await event.delete()
+            res = await user.get_inline_bot_results(BOT_USERNAME, "panel")
+            await user.send_inline_bot_result(m.chat.id, res.query_id, res.results[0].id)
+            return await m.delete()
         fn = CMD.get(name)
         if fn:
             try:
-                await fn(event, arg.strip())
+                await fn(m, arg.strip())
             except Exception as e:
-                await event.edit(f"⚠️ خطا: {e}")
+                try:
+                    await m.edit_text(f"⚠️ خطا: {e}", parse_mode=PM.DISABLED)
+                except Exception:
+                    pass
         return
-    await style(event)
+    await style(m)
     if S.get("autodel"):
-        asyncio.create_task(_del_later(event.chat_id, event.id, S.get("autodel_s", 60)))
+        asyncio.create_task(_del_later(m.chat.id, m.id, S.get("autodel_s", 60)))
 
 
 # ---------------- هندلر پیام‌های ورودی ----------------
 last_reply = {}
 
 
-@user.on(events.NewMessage(incoming=True))
-async def inc(event):
-    if (event.is_private and S.get("autoread_pv")) or \
-       (event.is_group and S.get("autoread_gp")) or \
-       (event.is_channel and not event.is_group and S.get("autoread_ch")):
-        await user.send_read_acknowledge(event.chat_id, event.message)
+@user.on_message(filters.incoming, group=3)
+async def inc(_, m):
+    ct = m.chat.type
+    is_pv = ct == enums.ChatType.PRIVATE
+    is_gp = ct in (enums.ChatType.GROUP, enums.ChatType.SUPERGROUP)
+    is_ch = ct == enums.ChatType.CHANNEL
 
-    if event.message.mentioned and not event.is_private and S.get("mentionlog"):
-        await event.message.forward_to("me")
+    if (is_pv and S.get("autoread_pv")) or (is_gp and S.get("autoread_gp")) or \
+       (is_ch and S.get("autoread_ch")):
+        await user.read_chat_history(m.chat.id)
 
-    if S.get("replylog") and event.is_reply:
-        r = await event.get_reply_message()
-        if r and r.out:
-            await event.message.forward_to("me")
+    if m.mentioned and not is_pv and S.get("mentionlog"):
+        await m.forward("me")
 
-    if not event.is_private:
+    if S.get("replylog") and m.reply_to_message:
+        r = m.reply_to_message
+        if r.from_user and r.from_user.is_self:
+            await m.forward("me")
+
+    if not is_pv or not m.from_user or m.from_user.is_bot:
         return
-    sender = await event.get_sender()
-    if getattr(sender, "bot", False):
-        return
 
-    for key, action in (("typing", "typing"), ("recvoice", "record-audio"), ("game", "game")):
+    for key, action in (("typing", enums.ChatAction.TYPING),
+                        ("recvoice", enums.ChatAction.RECORD_AUDIO),
+                        ("game", enums.ChatAction.PLAYING)):
         if S.get(key):
-            async with user.action(event.chat_id, action):
-                await asyncio.sleep(4)
+            await user.send_chat_action(m.chat.id, action)
+            await asyncio.sleep(4)
             break
 
-    reply = S.get("afk") and f"😴 {S['afk']}" or (S.get("autoreply") and S.get("reply_text", "سلام! بعداً پاسخ می‌دهم."))
-    if reply and time.time() - last_reply.get(event.sender_id, 0) > 3600:
-        last_reply[event.sender_id] = time.time()
-        await event.reply(reply)
+    reply = S.get("afk") and f"😴 {S['afk']}" or \
+        (S.get("autoreply") and S.get("reply_text", "سلام! بعداً پاسخ می‌دهم."))
+    if reply and time.time() - last_reply.get(m.from_user.id, 0) > 3600:
+        last_reply[m.from_user.id] = time.time()
+        await m.reply_text(reply, parse_mode=PM.DISABLED)
 
 
 # ---------------- ساعت پروفایل ----------------
@@ -1324,9 +1381,9 @@ async def clock_loop():
         try:
             now = dt.datetime.now().strftime("%H:%M")
             if S.get("nameclock"):
-                await user(UpdateProfileRequest(last_name=f"| {now}"))
+                await user.update_profile(last_name=f"| {now}")
             if S.get("bioclock"):
-                await user(UpdateProfileRequest(about=f"{S.get('bio_base', '')[:55]} | {now}"))
+                await user.update_profile(bio=f"{S.get('bio_base', '')[:55]} | {now}")
         except Exception:
             pass
         await asyncio.sleep(60 - dt.datetime.now().second)
@@ -1337,7 +1394,7 @@ async def main():
     if (os.environ.get("RAILWAY_ENVIRONMENT") or os.environ.get("RAILWAY_PROJECT_ID")) and not SESSION_STRING:
         sys.exit("❌ متغیر SESSION_STRING تنظیم نشده. اول gen_session.py را روی سیستم خودتان اجرا کنید.")
     await user.start()
-    await bot.start(bot_token=BOT_TOKEN)
+    await bot.start()
     ME = await user.get_me()
     BOT_USERNAME = (await bot.get_me()).username
     if S.get("pe_pack"):
@@ -1347,7 +1404,9 @@ async def main():
             pass
     print(f"✅ Self bot آماده است | پنل: .panel | ربات: @{BOT_USERNAME}")
     asyncio.create_task(clock_loop())
-    await asyncio.gather(user.run_until_disconnected(), bot.run_until_disconnected())
+    await idle()
+    await user.stop()
+    await bot.stop()
 
 
 if __name__ == "__main__":
