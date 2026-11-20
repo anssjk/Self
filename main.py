@@ -2,9 +2,14 @@
 """
 Self Bot تلگرام - ۲۰ صفحه × ۶ قابلیت = ۱۲۰ قابلیت (شامل ایموجی پریمیوم)
 نیازمندی: pip install telethon
-اجرا:  API_ID=... API_HASH=... BOT_TOKEN=... python main.py
+اجرا:  API_ID=... API_HASH=... BOT_TOKEN=... OWNER_ID=... python main.py
 در چت، پنل را با  .panel  باز کنید.
 (در @BotFather برای ربات دستور /setinline را بزنید.)
+
+ورود اولیه کاملاً از طریق پیوی خودِ همین ربات انجام می‌شود:
+وقتی بات بالا آمد، در تلگرام به ربات‌تان /start بدهید، بعد شماره و کد را
+در همان چت بفرستید. بعد از موفقیت، SESSION_STRING برایتان فرستاده می‌شود
+تا در Railway → Variables بگذارید و دیگر لازم نباشد تکرار شود.
 """
 import ast, asyncio, base64, codecs, collections, datetime as dt, hashlib, io
 import json, operator as op, os, platform, random, re, secrets, string, sys, time
@@ -17,6 +22,7 @@ from telethon.helpers import add_surrogate
 from telethon.tl.functions.account import UpdateProfileRequest
 from telethon.tl.functions.users import GetFullUserRequest
 from telethon.tl.functions.messages import GetStickerSetRequest
+from telethon.errors import SessionPasswordNeededError
 
 # --- ساخت SESSION_STRING (یک‌بار روی کامپیوتر/Termux):  python main.py session ---
 if len(sys.argv) > 1 and sys.argv[1] == "session":
@@ -43,16 +49,22 @@ API_ID = int(os.environ["API_ID"].strip())
 API_HASH = os.environ["API_HASH"].strip()
 BOT_TOKEN = os.environ["BOT_TOKEN"].strip()
 
-SESSION_STRING = os.environ.get("SESSION_STRING")  # برای Railway (با python main.py session بسازید)
-user = TelegramClient(StringSession(SESSION_STRING) if SESSION_STRING else "self_session",
-                      API_ID, API_HASH)
-bot = TelegramClient(StringSession() if SESSION_STRING else "panel_bot", API_ID, API_HASH)
+SESSION_STRING = os.environ.get("SESSION_STRING", "").strip() or None
+
+# ---------------- تنظیمات ماندگار ----------------
+FILE = os.environ.get("SETTINGS_FILE") or ("/data/settings.json" if os.path.isdir("/data") else "settings.json")
+_SESSION_FILE = os.path.join(os.path.dirname(FILE) or ".", ".session_string")
+
+if not SESSION_STRING and os.path.exists(_SESSION_FILE):
+    SESSION_STRING = open(_SESSION_FILE).read().strip() or None
+
+# کلاینت‌ها همیشه با StringSession ساخته می‌شوند تا بعد از ورود، رشته نشست قابل ذخیره باشد
+user = TelegramClient(StringSession(SESSION_STRING), API_ID, API_HASH)
+bot = TelegramClient(StringSession(), API_ID, API_HASH)
 ME = None
 BOT_USERNAME = None
 START = time.time()
 
-# ---------------- تنظیمات ماندگار ----------------
-FILE = os.environ.get("SETTINGS_FILE") or ("/data/settings.json" if os.path.isdir("/data") else "settings.json")
 S = json.load(open(FILE)) if os.path.exists(FILE) else {}
 
 
@@ -1353,12 +1365,103 @@ async def clock_loop():
         await asyncio.sleep(60 - dt.datetime.now().second)
 
 
+async def ensure_login():
+    """
+    اگر هنوز وارد نشده‌ایم، از طریق پیوی خودِ همین ربات (BOT_TOKEN شما) شماره و کد را
+    می‌گیریم و با آن وارد اکانت می‌شویم. هیچ کدی به سروری غیر از همین سرور خودتان نمی‌رود.
+    نیازمند OWNER_ID (آیدی عددی خودتان، از @userinfobot) است.
+    """
+    await bot.start(bot_token=BOT_TOKEN)
+    await user.connect()
+    if await user.is_user_authorized():
+        return  # قبلاً وارد شده‌ایم
+
+    owner_raw = os.environ.get("OWNER_ID", "").strip()
+    if not owner_raw.lstrip("-").isdigit():
+        sys.exit(
+            "❌ برای ورود خودکار، متغیر OWNER_ID را تنظیم کنید: آیدی عددی خودتان در تلگرام "
+            "(از @userinfobot بگیرید) را در Railway → Variables بگذارید، سپس دوباره دیپلوی کنید."
+        )
+    owner_id = int(owner_raw)
+
+    print("⏳ منتظر شروع ورود هستم: در تلگرام به ربات‌تان پیام /start بدهید.", flush=True)
+
+    fut = asyncio.get_event_loop().create_future()
+
+    async def _wait_start(event):
+        if event.sender_id == owner_id and not fut.done():
+            fut.set_result(True)
+        elif not fut.done():
+            try:
+                await event.reply("⛔ این مرحله فقط برای صاحب اکانت است.")
+            except Exception:
+                pass
+
+    bot.add_event_handler(_wait_start, events.NewMessage(incoming=True))
+    await fut
+    bot.remove_event_handler(_wait_start)
+
+    async with bot.conversation(owner_id, timeout=600) as conv:
+        phone = None
+        await conv.send_message(
+            "🔐 **راه‌اندازی اولیه**\n"
+            "شماره تلفن تلگرامتان را با کد کشور بفرستید (مثال: +989121234567)"
+        )
+        for _ in range(3):
+            resp = await conv.get_response()
+            phone_try = resp.raw_text.strip()
+            try:
+                await user.send_code_request(phone_try)
+                phone = phone_try
+                break
+            except Exception as e:
+                await conv.send_message(f"⚠️ {e}\nدوباره با فرمت +98912... بفرستید.")
+        if not phone:
+            sys.exit("❌ شماره معتبر دریافت نشد؛ دوباره دیپلوی کنید تا از نو تلاش شود.")
+
+        await conv.send_message(
+            "📩 کدی که از تلگرام برایتان آمد را همین‌جا بفرستید.\n"
+            "⚠️ این کد را فقط همین‌جا (به ربات خودتان) بدهید، هیچ‌جای دیگری نفرستید."
+        )
+        signed_in = False
+        for _ in range(3):
+            resp = await conv.get_response()
+            code = resp.raw_text.strip().replace(" ", "")
+            try:
+                await user.sign_in(phone=phone, code=code)
+                signed_in = True
+                break
+            except SessionPasswordNeededError:
+                await conv.send_message("🔑 حساب شما تأیید دومرحله‌ای دارد. رمز دومرحله‌ای را بفرستید.")
+                pw = await conv.get_response()
+                await user.sign_in(password=pw.raw_text.strip())
+                signed_in = True
+                break
+            except Exception as e:
+                await conv.send_message(f"⚠️ کد اشتباه یا منقضی: {e}\nدوباره بفرستید.")
+        if not signed_in:
+            sys.exit("❌ ورود ناموفق بود؛ دوباره دیپلوی کنید تا از نو تلاش شود.")
+
+        new_session = user.session.save()
+        try:
+            with open(_SESSION_FILE, "w") as f:
+                f.write(new_session)
+        except Exception:
+            pass
+        await conv.send_message(
+            "✅ ورود موفق بود!\n\n"
+            "برای اینکه دیگر لازم نباشد این مرحله را تکرار کنید (مخصوصاً اگر Volume در Railway "
+            "نساخته‌اید)، این رشته را محرمانه نگه دارید و در Railway → Variables با نام "
+            "`SESSION_STRING` ذخیره کنید:\n\n"
+            f"`{new_session}`"
+        )
+    print("✅ ورود با موفقیت انجام شد.", flush=True)
+
+
 async def main():
     global ME, BOT_USERNAME
-    if (os.environ.get("RAILWAY_ENVIRONMENT") or os.environ.get("RAILWAY_PROJECT_ID")) and not SESSION_STRING:
-        sys.exit("❌ متغیر SESSION_STRING تنظیم نشده. اول روی سیستم خودتان «python main.py session» را اجرا کنید.")
+    await ensure_login()
     await user.start()
-    await bot.start(bot_token=BOT_TOKEN)
     ME = await user.get_me()
     BOT_USERNAME = (await bot.get_me()).username
     if S.get("pe_pack"):
